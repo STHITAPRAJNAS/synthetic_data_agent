@@ -7,6 +7,7 @@ from .specialists.pii_handler.agent import PIIHandlerAgent
 from .specialists.validator.agent import ValidatorAgent
 from ..models.generation_plan import GenerationPlan
 from ..tools.knowledge_base import KnowledgeBase
+from ..tools.semantic_memory import SemanticMemory
 import structlog
 
 logger = structlog.get_logger()
@@ -19,6 +20,7 @@ class Orchestrator:
         self.pii_handler = PIIHandlerAgent()
         self.validator = ValidatorAgent()
         self.knowledge_base = KnowledgeBase()
+        self.semantic_memory = SemanticMemory()
         
         self.agent = Agent(
             name="Orchestrator",
@@ -31,29 +33,41 @@ class Orchestrator:
             4. Validate each table via ValidatorAgent.
             5. Report final results.
             
-            You can also remember complex business rules interactively. If the user tells you about a constraint (e.g. 'age > 18' for 'users' table), use remember_business_rule to save it. It will be automatically applied by the GeneratorAgent."""
+            You have a Semantic Memory (pgvector). If you aren't sure how to generate 
+            data for a table, use `search_semantic_knowledge` to see how you handled 
+            similar tables in the past. If the user tells you a general preference 
+            (e.g. 'We always use CTGAN for financial data'), store it using 
+            `remember_business_rule` which also indexes it semantically."""
         )
         self.agent.register_tool(self.remember_business_rule)
+        self.agent.register_tool(self.search_semantic_knowledge)
         self.agent.register_tool(self.run_pipeline)
+
+    @tool
+    async def search_semantic_knowledge(self, query: str) -> str:
+        """Search the pgvector semantic memory for similar past experiences or rules."""
+        results = await self.semantic_memory.search_similar(query)
+        if not results:
+            return "No similar past experiences found."
+        return f"Found {len(results)} similar items: " + str(results)
 
     @tool
     async def remember_business_rule(self, table_fqn: str, description: str, pandas_query: str) -> str:
         """
-        Store a business rule for a given table.
-        Args:
-            table_fqn: Table fully qualified name.
-            description: Human readable description.
-            pandas_query: A valid pandas .query() string to filter valid rows (e.g., 'age > 18').
+        Store a business rule for a given table and index it semantically.
         """
         await self.knowledge_base.add_business_rule(table_fqn, description, pandas_query)
-        return f"Successfully remembered rule for {table_fqn}: {description}"
+        # Index in semantic memory for future RAG
+        await self.semantic_memory.store_memory(table_fqn, description, {"query": pandas_query, "type": "rule"})
+        return f"Successfully remembered and indexed rule for {table_fqn}: {description}"
 
     async def run_pipeline(self, table_fqns: List[str]):
         """Execute the full synthetic data generation pipeline."""
         logger.info("Starting pipeline", tables=table_fqns)
         
-        # Initialize database tables for KB and Registry
+        # Initialize all database tables
         await self.knowledge_base.init_db()
+        await self.semantic_memory.init_db()
         await self.generator.registry.init_db()
         
         # Phase 1: Profile
