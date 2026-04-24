@@ -26,23 +26,39 @@ class PIIHandlerAgent:
     async def populate_pii_columns(self, table_fqn: str, row_count: int, pii_spec: Dict[str, Any]) -> Dict[str, List[Any]]:
         """
         Generate synthetic PII data for the specified columns.
-        pii_spec: mapping of col_name -> {'category': PIICategory, 'dist_type': DistributionType}
+        Supports deep re-hydration of JSON structures.
         """
         logger.info("Populating PII columns", table=table_fqn, rows=row_count)
         data = {}
+        
+        # Pull templates for JSON columns from Databricks/File
+        from ....tools.databricks_tools import DatabricksTools
+        db = DatabricksTools()
+        
         for col_name, spec in pii_spec.items():
             category = spec.get('category')
             dist_type = spec.get('dist_type')
 
-            if dist_type == DistributionType.JSON:
-                # We need a sample to know the structure, but we aren't allowed real PII.
-                # Usually we'd receive a schema or a 'template' JSON from the Profiler.
-                # For now, we'll assume the non-PII generation provides the 'shell'
-                # and we re-hydrate it.
-                data[col_name] = [] # This would be merged later
+            if dist_type == "DistributionType.JSON":
+                # 1. Sample 'Shell' structures from real data to ensure syntax validity
+                real_samples = await db.sample_dataframe(table_fqn, row_count)
+                raw_json_strings = real_samples[col_name].tolist()
+                
+                # 2. Deep Recursive Re-hydration
+                synthetic_jsons = []
+                for sj in raw_json_strings:
+                    try:
+                        parsed = json.loads(sj)
+                        rehydrated = recursive_rehydrate(parsed)
+                        synthetic_jsons.append(json.dumps(rehydrated))
+                    except:
+                        # Fallback to string re-hydration if not valid JSON
+                        synthetic_jsons.append(generate_synthetic_instruction(str(sj)))
+                data[col_name] = synthetic_jsons
                 continue
 
-            if category == PIICategory.DIRECT_PII:
+            # Standard flat PII generation
+            if category == "PIICategory.DIRECT_PII":
                 if "ssn" in col_name.lower():
                     data[col_name] = [generate_synthetic_ssn() for _ in range(row_count)]
                 elif "email" in col_name.lower():
@@ -51,7 +67,7 @@ class PIIHandlerAgent:
                     data[col_name] = [generate_synthetic_name() for _ in range(row_count)]
                 else:
                     data[col_name] = [f"PII_{i}" for i in range(row_count)]
-            elif category == PIICategory.QUASI_PII:
+            elif category == "PIICategory.QUASI_PII":
                 if "phone" in col_name.lower():
                     data[col_name] = [generate_synthetic_phone() for _ in range(row_count)]
                 else:

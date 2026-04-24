@@ -104,7 +104,7 @@ class Orchestrator:
                 # 1. Generate Non-PII
                 gen_result = await self.generator.generate_table_data(config)
                 
-                # 2. Generate PII (Metadata only)
+                # 2. Generate PII and JSON (Recursive Re-hydration)
                 profile = next(p for p in profiles if p.table_fqn == table_fqn)
                 pii_spec = {
                     c.name: {"category": str(c.pii_category), "dist_type": str(c.distribution_type)} 
@@ -112,10 +112,20 @@ class Orchestrator:
                 }
                 pii_data = await self.pii_handler.populate_pii_columns(table_fqn, config.target_row_count, pii_spec)
                 
-                # 3. Validation Gate
+                # 3. Merge and Finalize
+                # Pull the generated Non-PII data back from Databricks/File to join
                 output_fqn = f"{settings.output_catalog}.{settings.databricks_schema}.{table_fqn.split('.')[-1]}"
-                quasi_ids = [c.name for c in profile.columns if c.pii_category == "QUASI_PII"]
+                synth_df = await self.generator.db_tools.sample_dataframe(output_fqn, config.target_row_count)
                 
+                for col, values in pii_data.items():
+                    if values: # Only if PIIHandler returned data
+                        synth_df[col] = values
+                
+                # Write the finalized merged table
+                await self.generator.db_tools.write_synthetic_table(output_fqn, synth_df)
+                
+                # 4. Validation Gate
+                quasi_ids = [c.name for c in profile.columns if c.pii_category == "QUASI_PII"]
                 report = await self.validator.validate_table(table_fqn, output_fqn, quasi_ids)
                 
                 if report.overall_pass:
