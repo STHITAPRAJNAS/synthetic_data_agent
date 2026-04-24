@@ -81,18 +81,37 @@ def generate_synthetic_ip() -> str:
     base = random.choice(ranges)
     return f"{base}.{random.randint(1, 254)}"
 
+from presidio_analyzer import AnalyzerEngine
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+
+analyzer = AnalyzerEngine()
+anonymizer = AnonymizerEngine()
+
 def generate_synthetic_instruction(original_text: str) -> str:
     """
-    Template-based synthesis for complex instructions.
-    Replaces IDs, account numbers, and amounts with synthetic versions.
+    Advanced NLP re-hydration for complex instructions.
+    Uses Presidio to find ORGs and LOCs and replaces them with Faker.
     """
-    # Simple example of pattern-preserving synthesis
-    text = original_text
-    # Replace potential account patterns
-    text = re.sub(r"ACCT-\d+", f"ACCT-{random.randint(10000, 99999)}", text)
-    # Replace potential amounts
-    text = re.sub(r"\$\d+", f"${random.randint(1, 1000)}", text)
-    return text
+    # 1. Analyze the text for entities
+    results = analyzer.analyze(text=original_text, language='en', 
+                                entities=["PERSON", "LOCATION", "ORG", "US_PASSPORT", "US_SSN"])
+    
+    # 2. Define how to replace each entity type
+    operators = {
+        "PERSON": OperatorConfig("replace", {"new_value": fake.name()}),
+        "LOCATION": OperatorConfig("replace", {"new_value": fake.address()}),
+        "ORG": OperatorConfig("replace", {"new_value": fake.company()}),
+        "US_SSN": OperatorConfig("replace", {"new_value": generate_synthetic_ssn()}),
+    }
+    
+    # 3. Anonymize (actually Re-hydrate) the text
+    res = anonymizer.anonymize(
+        text=original_text,
+        analyzer_results=results,
+        operators=operators
+    )
+    return res.text
 
 def get_generator_for_category(category: PIICategory):
     # Mapping logic here
