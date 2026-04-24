@@ -1,5 +1,8 @@
 from typing import List, Dict, Any
-from google.adk import Agent, tool
+from google.adk.agents.llm_agent import LlmAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models.llm_request import LlmRequest
+from google.adk import tool
 from .specialists.profiler.agent import ProfilerAgent
 from .specialists.entity_graph.agent import EntityGraphAgent
 from .specialists.generator.agent import GeneratorAgent
@@ -8,6 +11,7 @@ from .specialists.validator.agent import ValidatorAgent
 from ..models.generation_plan import GenerationPlan
 from ..tools.knowledge_base import KnowledgeBase
 from ..tools.semantic_memory import SemanticMemory
+from ..config import settings
 import structlog
 
 logger = structlog.get_logger()
@@ -22,26 +26,40 @@ class Orchestrator:
         self.knowledge_base = KnowledgeBase()
         self.semantic_memory = SemanticMemory()
         
-        self.agent = Agent(
+        instructions = """
+        # IDENTITY
+        You are the Synthetic Data Generation Orchestrator. You are responsible for 
+        end-to-end coordination of the data synthesis pipeline.
+
+        # PIPELINE PHASES
+        1. **Profiling**: Identify PII and statistical DNA via `ProfilerAgent`.
+        2. **Graphing**: Determine FK relationships and generation order via `EntityGraphAgent`.
+        3. **Synthesis**: Coordinate parallel generation of Non-PII (via `GeneratorAgent`) 
+           and PII (via `PIIHandlerAgent`).
+        4. **Validation**: Enforce quality gates via `ValidatorAgent`.
+
+        # KNOWLEDGE MANAGEMENT
+        - Use `search_semantic_knowledge` to leverage past learnings.
+        - Use `remember_business_rule` to persist new constraints.
+        - Prioritize existing business rules in the Knowledge Base for every run.
+        """
+
+        self.agent = LlmAgent(
             name="Orchestrator",
-            instructions="""You are the Synthetic Data Generation Orchestrator.
-            Your job is to coordinate the full pipeline:
-            1. Profile tables via ProfilerAgent.
-            2. Build generation plan via EntityGraphAgent.
-            3. Generate data for each table via GeneratorAgent (Non-PII) 
-               and PIIHandlerAgent (PII).
-            4. Validate each table via ValidatorAgent.
-            5. Report final results.
-            
-            You have a Semantic Memory (pgvector). If you aren't sure how to generate 
-            data for a table, use `search_semantic_knowledge` to see how you handled 
-            similar tables in the past. If the user tells you a general preference 
-            (e.g. 'We always use CTGAN for financial data'), store it using 
-            `remember_business_rule` which also indexes it semantically."""
+            instructions=instructions,
+            model="gemini-2.0-pro-exp-02-05", # Use Pro for Orchestration
+            before_model_callback=self._ensure_db_init
         )
         self.agent.register_tool(self.remember_business_rule)
         self.agent.register_tool(self.search_semantic_knowledge)
         self.agent.register_tool(self.run_pipeline)
+
+    async def _ensure_db_init(self, ctx: CallbackContext, request: LlmRequest):
+        """Ensure persistent stores are ready before agent starts thinking."""
+        await self.knowledge_base.init_db()
+        await self.semantic_memory.init_db()
+        await self.generator.registry.init_db()
+        return request
 
     @tool
     async def search_semantic_knowledge(self, query: str) -> str:

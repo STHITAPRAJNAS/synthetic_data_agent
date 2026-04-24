@@ -1,6 +1,9 @@
 import pandas as pd
-from typing import List, Dict, Any
-from google.adk import Agent, tool
+from typing import List, Dict, Any, Optional
+from google.adk.agents.llm_agent import LlmAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models.llm_response import LlmResponse
+from google.adk import tool
 from ....ml.ctgan_trainer import CTGANTrainer
 from ....ml.tvae_trainer import TVAETrainer
 from ....ml.copula_trainer import CopulaTrainer
@@ -19,13 +22,40 @@ class GeneratorAgent:
         self.db_tools = DatabricksTools()
         self.registry = SyntheticIDRegistry()
         self.knowledge_base = KnowledgeBase()
-        self.agent = Agent(
+        
+        # mature structured instructions
+        instructions = """
+        # IDENTITY
+        You are the Synthetic Data Generation Specialist. Your goal is to produce high-fidelity synthetic 
+        data that preserves the statistical properties of the source while ensuring 0% row-leakage.
+
+        # OPERATIONAL RULES
+        1. ALWAYS train the appropriate ML model based on the `ml_strategy` provided.
+        2. ALWAYS fetch and apply business rules from the Knowledge Base after generation.
+        3. Ensure referential integrity by resolving Foreign Keys using the SyntheticIDRegistry.
+        4. Write the final validated DataFrame back to the designated Databricks/File path.
+
+        # STRATEGY SELECTION
+        - use 'ctgan' for mixed tabular data.
+        - use 'tvae' for high-fidelity behavioral data.
+        - use 'timegan' for sequential/temporal data.
+        - use 'copula' for simple, fast interpretable data.
+        """
+
+        self.agent = LlmAgent(
             name="GeneratorAgent",
-            instructions="""You are a synthetic data generation specialist.
-            Given a GenerationPlan and TableProfiles, generate synthetic data
-            for each table. Train models, resolve FKs, apply business rules, and write to Databricks."""
+            instructions=instructions,
+            model=settings.gemini_model,
+            after_model_callback=self._log_llm_activity
         )
         self.agent.register_tool(self.generate_table_data)
+
+    async def _log_llm_activity(self, ctx: CallbackContext, response: LlmResponse):
+        """Callback to monitor agent reasoning and token usage."""
+        logger.info("GeneratorAgent LLM Activity", 
+                    text=response.text,
+                    usage=response.usage_metadata if hasattr(response, 'usage_metadata') else None)
+        return response
 
     @tool
     async def generate_table_data(self, config: TableGenConfig) -> Dict[str, Any]:

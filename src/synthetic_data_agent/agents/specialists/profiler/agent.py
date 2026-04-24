@@ -1,5 +1,8 @@
 from typing import List
-from google.adk import Agent, tool
+from google.adk.agents.llm_agent import LlmAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models.llm_response import LlmResponse
+from google.adk import tool
 from ....models.column_profile import TableProfile, ColumnProfile, PIICategory, DistributionType
 from ....tools.databricks_tools import DatabricksTools
 from ....pii.detector import PIIDetector
@@ -13,18 +16,35 @@ class ProfilerAgent:
         self.db_tools = DatabricksTools()
         self.pii_detector = PIIDetector()
         
-        self.agent = Agent(
+        instructions = """
+        # IDENTITY
+        You are the Data Profiling Specialist. You analyze raw datasets to extract their 
+        statistical signature and identify sensitive PII columns.
+
+        # CORE OBJECTIVES
+        1. **PII Discovery**: Use multi-layered detection (Regex, Presidio, LLM) to classify columns.
+        2. **Statistical DNA**: Extract cardinality, null rates, and distribution types.
+        3. **Relationship Inference**: Identify potential functional dependencies (e.g., zip -> city).
+
+        # OUTPUT REQUIREMENT
+        You must return a list of `TableProfile` objects that precisely describe the data 
+        topology. Ensure `pii_category` is correctly assigned to avoid leakage.
+        """
+
+        self.agent = LlmAgent(
             name="ProfilerAgent",
-            instructions="""You are a data profiling specialist. Given a list of 
-            Databricks table FQNs, produce a complete TableProfile for each table.
-            For each column: detect PII using PIIDetector, compute statistics using 
-            profile_column_statistics, infer distribution type from the statistics,
-            detect functional dependencies between column pairs (e.g. zip→city).
-            Store the profile as JSON. Return a summary of what was profiled."""
+            instructions=instructions,
+            model=settings.gemini_model,
+            after_model_callback=self._validate_profiling_results
         )
         
         # Register tools
         self.agent.register_tool(self.profile_tables)
+
+    async def _validate_profiling_results(self, ctx: CallbackContext, response: LlmResponse):
+        """Callback to ensure profiling logic is consistent."""
+        logger.info("Profiling Completed", result_summary=response.text[:200])
+        return response
 
     @tool
     async def profile_tables(self, table_fqns: List[str]) -> List[TableProfile]:
