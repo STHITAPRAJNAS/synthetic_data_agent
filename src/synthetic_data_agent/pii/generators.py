@@ -113,6 +113,21 @@ def generate_synthetic_instruction(original_text: str) -> str:
     )
     return res.text
 
+def recursive_rehydrate(data: Any) -> Any:
+    """
+    Recursively scans and re-hydrates strings inside nested JSON/Dict/List structures.
+    """
+    if isinstance(data, dict):
+        return {k: recursive_rehydrate(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [recursive_rehydrate(i) for i in data]
+    elif isinstance(data, str):
+        # Only re-hydrate if it's not a short code or ID
+        if len(data) > 10:
+            return generate_synthetic_instruction(data)
+        return data
+    return data
+
 def get_generator_for_category(category: PIICategory):
     # Mapping logic here
     pass

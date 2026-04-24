@@ -4,10 +4,11 @@ import pandas as pd
 from ....pii.generators import (
     generate_synthetic_ssn, generate_synthetic_email, 
     generate_synthetic_name, generate_synthetic_phone,
-    generate_synthetic_address
+    generate_synthetic_address, recursive_rehydrate
 )
-from ....models.column_profile import PIICategory
+from ....models.column_profile import PIICategory, DistributionType
 import structlog
+import json
 
 logger = structlog.get_logger()
 
@@ -22,11 +23,25 @@ class PIIHandlerAgent:
         self.agent.register_tool(self.populate_pii_columns)
 
     @tool
-    async def populate_pii_columns(self, table_fqn: str, row_count: int, pii_spec: Dict[str, str]) -> Dict[str, List[Any]]:
-        """Generate synthetic PII data for the specified columns."""
+    async def populate_pii_columns(self, table_fqn: str, row_count: int, pii_spec: Dict[str, Any]) -> Dict[str, List[Any]]:
+        """
+        Generate synthetic PII data for the specified columns.
+        pii_spec: mapping of col_name -> {'category': PIICategory, 'dist_type': DistributionType}
+        """
         logger.info("Populating PII columns", table=table_fqn, rows=row_count)
         data = {}
-        for col_name, category in pii_spec.items():
+        for col_name, spec in pii_spec.items():
+            category = spec.get('category')
+            dist_type = spec.get('dist_type')
+
+            if dist_type == DistributionType.JSON:
+                # We need a sample to know the structure, but we aren't allowed real PII.
+                # Usually we'd receive a schema or a 'template' JSON from the Profiler.
+                # For now, we'll assume the non-PII generation provides the 'shell'
+                # and we re-hydrate it.
+                data[col_name] = [] # This would be merged later
+                continue
+
             if category == PIICategory.DIRECT_PII:
                 if "ssn" in col_name.lower():
                     data[col_name] = [generate_synthetic_ssn() for _ in range(row_count)]

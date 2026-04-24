@@ -106,7 +106,10 @@ class Orchestrator:
                 
                 # 2. Generate PII (Metadata only)
                 profile = next(p for p in profiles if p.table_fqn == table_fqn)
-                pii_spec = {c.name: str(c.pii_category) for c in profile.columns if c.pii_category != "SAFE"}
+                pii_spec = {
+                    c.name: {"category": str(c.pii_category), "dist_type": str(c.distribution_type)} 
+                    for c in profile.columns if c.pii_category != "SAFE" or c.distribution_type == "JSON"
+                }
                 pii_data = await self.pii_handler.populate_pii_columns(table_fqn, config.target_row_count, pii_spec)
                 
                 # 3. Validation Gate

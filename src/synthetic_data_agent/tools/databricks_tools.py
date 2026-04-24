@@ -21,15 +21,20 @@ class DatabricksTools:
         ).getOrCreate()
 
     async def read_table_schema(self, table_fqn: str) -> dict[str, Any]:
-        """Read Unity Catalog schema for a table, or infer from local file."""
+        """Read Unity Catalog schema for a table, or infer from local file (CSV, Parquet, JSON)."""
         logger.info("Reading table schema", table=table_fqn)
         try:
             if table_fqn.startswith("file://"):
                 path = table_fqn.replace("file://", "")
                 if path.endswith(".csv"):
                     df = pd.read_csv(path, nrows=5)
-                else:
+                elif path.endswith(".parquet"):
                     df = pd.read_parquet(path, engine="pyarrow")
+                elif path.endswith((".json", ".jsonl")):
+                    df = pd.read_json(path, lines=path.endswith(".jsonl"), nrows=5)
+                else:
+                    raise ValueError(f"Unsupported file format: {path}")
+                    
                 return {
                     "columns": [
                         {"name": str(c), "type": str(df[c].dtype), "comment": "inferred"}
@@ -75,14 +80,18 @@ class DatabricksTools:
         return stats
 
     async def sample_dataframe(self, table_fqn: str, n_rows: int) -> pd.DataFrame:
-        """Pull a stratified sample from Databricks as a pandas DataFrame."""
+        """Pull a stratified sample from Databricks or local file as a pandas DataFrame."""
         logger.info("Sampling dataframe", table=table_fqn, n_rows=n_rows)
         if table_fqn.startswith("file://"):
             path = table_fqn.replace("file://", "")
             if path.endswith(".csv"):
                 df = pd.read_csv(path)
-            else:
+            elif path.endswith(".parquet"):
                 df = pd.read_parquet(path, engine="pyarrow")
+            elif path.endswith((".json", ".jsonl")):
+                df = pd.read_json(path, lines=path.endswith(".jsonl"))
+            else:
+                raise ValueError(f"Unsupported file format: {path}")
             return df.sample(n=min(n_rows, len(df))) if len(df) > 0 else df
 
         query = f"SELECT * FROM {table_fqn} TABLESAMPLE ({n_rows} ROWS)"
@@ -97,23 +106,30 @@ class DatabricksTools:
         return []
 
     async def write_synthetic_table(self, table_fqn: str, df: pd.DataFrame, mode: str = "overwrite") -> dict[str, Any]:
-        """Write synthetic data to Databricks or local file."""
+        """Write synthetic data to Databricks or local file (CSV, Parquet, JSON)."""
         logger.info("Writing synthetic table", table=table_fqn, rows=len(df))
         
         if table_fqn.startswith("file://"):
             path = table_fqn.replace("file://", "")
+            is_json = path.endswith((".json", ".jsonl"))
+            is_lines = path.endswith(".jsonl")
+
             if mode == "append" and Path(path).exists():
                 if path.endswith(".csv"):
                     df.to_csv(path, mode='a', header=False, index=False)
-                else:
-                    # Parquet append is complex, usually involves rewriting or dataset partitioning
+                elif path.endswith(".parquet"):
                     existing = pd.read_parquet(path)
                     pd.concat([existing, df]).to_parquet(path)
+                elif is_json:
+                    existing = pd.read_json(path, lines=is_lines)
+                    pd.concat([existing, df]).to_json(path, orient='records', lines=is_lines)
             else:
                 if path.endswith(".csv"):
                     df.to_csv(path, index=False)
-                else:
+                elif path.endswith(".parquet"):
                     df.to_parquet(path)
+                elif is_json:
+                    df.to_json(path, orient='records', lines=is_lines)
             return {"rows_written": len(df), "table_fqn": table_fqn}
 
         spark_df = self.spark.createDataFrame(df)

@@ -74,7 +74,17 @@ class ProfilerAgent:
                 if pii_cat != PIICategory.SAFE:
                     dist_type = DistributionType.HIGH_CARD_STRING
                 elif df[col].dtype == 'object':
-                    dist_type = DistributionType.CATEGORICAL
+                    # Check for JSON
+                    sample_val = str(df[col].dropna().iloc[0]) if not df[col].dropna().empty else ""
+                    if sample_val.startswith(("{", "[")):
+                        try:
+                            import json
+                            json.loads(sample_val)
+                            dist_type = DistributionType.JSON
+                        except:
+                            dist_type = DistributionType.CATEGORICAL
+                    else:
+                        dist_type = DistributionType.CATEGORICAL
                 
                 cp = ColumnProfile(
                     name=col,
