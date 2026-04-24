@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
 
     # Infrastructure Config
-    redis_url: str = "redis://localhost:6379"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/synthetic_data"
     model_storage_path: Path = Field(default=Path("./ml_models"), description="Path to store trained ML models")
 
     # Generation Config

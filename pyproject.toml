@@ -45,7 +45,8 @@ dependencies = [
     "sdmetrics>=0.16.0",
 
     # Storage + caching
-    "redis>=5.0.0",
+    "sqlalchemy>=2.0.0",
+    "asyncpg>=0.29.0",
     "joblib>=1.4.0",
 
     # Observability

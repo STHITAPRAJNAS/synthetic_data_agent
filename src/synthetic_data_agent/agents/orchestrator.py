@@ -52,6 +52,10 @@ class Orchestrator:
         """Execute the full synthetic data generation pipeline."""
         logger.info("Starting pipeline", tables=table_fqns)
         
+        # Initialize database tables for KB and Registry
+        await self.knowledge_base.init_db()
+        await self.generator.registry.init_db()
+        
         # Phase 1: Profile
         profiles = await self.profiler.profile_tables(table_fqns)
         

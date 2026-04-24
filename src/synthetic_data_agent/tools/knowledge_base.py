@@ -1,41 +1,60 @@
-import redis.asyncio as redis
-import json
 from typing import List, Optional
+import json
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import String, Text, select, delete
 from ..config import settings
 import structlog
 
 logger = structlog.get_logger()
 
+class Base(DeclarativeBase):
+    pass
+
+class BusinessRule(Base):
+    __tablename__ = "business_rules"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    table_fqn: Mapped[str] = mapped_column(String(255), index=True)
+    description: Mapped[str] = mapped_column(Text)
+    code: Mapped[str] = mapped_column(Text)
+
 class KnowledgeBase:
     """
-    Session/Memory store for Business Rules and Metadata.
-    Allows the agent to remember constraints for specific tables.
+    Postgres-backed Session/Memory store for Business Rules.
     """
-    def __init__(self, redis_url: str = settings.redis_url):
-        self.redis = redis.from_url(redis_url, decode_responses=True)
+    def __init__(self, database_url: str = settings.database_url):
+        self.engine = create_async_engine(database_url)
+        self.async_session = sessionmaker(
+            self.engine, expire_on_commit=False, class_=AsyncSession
+        )
+
+    async def init_db(self):
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
     async def add_business_rule(self, table_fqn: str, rule_description: str, rule_code: str):
-        """
-        Store a business rule for a table.
-        rule_description: Human readable constraint.
-        rule_code: pandas query string or python eval code (e.g. 'age >= 18').
-        """
-        key = f"kb:rules:{table_fqn}"
-        rule = {
-            "description": rule_description,
-            "code": rule_code
-        }
-        await self.redis.sadd(key, json.dumps(rule))
+        async with self.async_session() as session:
+            rule = BusinessRule(
+                table_fqn=table_fqn,
+                description=rule_description,
+                code=rule_code
+            )
+            session.add(rule)
+            await session.commit()
         logger.info("Added business rule to Knowledge Base", table=table_fqn, rule=rule_description)
 
     async def get_business_rules(self, table_fqn: str) -> List[dict]:
-        """Retrieve all business rules for a given table."""
-        key = f"kb:rules:{table_fqn}"
-        rules_raw = await self.redis.smembers(key)
-        return [json.loads(r) for r in rules_raw]
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(BusinessRule).where(BusinessRule.table_fqn == table_fqn)
+            )
+            rules = result.scalars().all()
+            return [{"description": r.description, "code": r.code} for r in rules]
 
     async def clear_rules(self, table_fqn: str):
-        """Clear all rules for a given table."""
-        key = f"kb:rules:{table_fqn}"
-        await self.redis.delete(key)
+        async with self.async_session() as session:
+            await session.execute(
+                delete(BusinessRule).where(BusinessRule.table_fqn == table_fqn)
+            )
+            await session.commit()
         logger.info("Cleared business rules from Knowledge Base", table=table_fqn)
