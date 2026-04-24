@@ -81,6 +81,19 @@ def generate_synthetic_ip() -> str:
     base = random.choice(ranges)
     return f"{base}.{random.randint(1, 254)}"
 
+def generate_synthetic_instruction(original_text: str) -> str:
+    """
+    Template-based synthesis for complex instructions.
+    Replaces IDs, account numbers, and amounts with synthetic versions.
+    """
+    # Simple example of pattern-preserving synthesis
+    text = original_text
+    # Replace potential account patterns
+    text = re.sub(r"ACCT-\d+", f"ACCT-{random.randint(10000, 99999)}", text)
+    # Replace potential amounts
+    text = re.sub(r"\$\d+", f"${random.randint(1, 1000)}", text)
+    return text
+
 def get_generator_for_category(category: PIICategory):
     # Mapping logic here
     pass
