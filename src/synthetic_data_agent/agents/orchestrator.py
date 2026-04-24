@@ -80,39 +80,54 @@ class Orchestrator:
         return f"Successfully remembered and indexed rule for {table_fqn}: {description}"
 
     async def run_pipeline(self, table_fqns: List[str]):
-        """Execute the full synthetic data generation pipeline."""
-        logger.info("Starting pipeline", tables=table_fqns)
+        """Execute the full synthetic data generation pipeline with self-correction."""
+        logger.info("Starting pipeline with Self-Correction Loop", tables=table_fqns)
         
-        # Initialize all database tables
         await self.knowledge_base.init_db()
         await self.semantic_memory.init_db()
         await self.generator.registry.init_db()
         
-        # Phase 1: Profile
         profiles = await self.profiler.profile_tables(table_fqns)
-        
-        # Phase 2: Entity Graph
         plan = await self.entity_graph.create_generation_plan(profiles)
         
-        # Phase 3: Generate and Validate
-        results = []
+        final_reports = []
         for table_fqn in plan.tables_ordered:
             config = plan.table_configs[table_fqn]
+            attempts = 0
+            max_attempts = 3
+            pass_gate = False
             
-            # Generate Non-PII
-            gen_result = await self.generator.generate_table_data(config)
+            while attempts < max_attempts and not pass_gate:
+                attempts += 1
+                logger.info("Generation attempt", table=table_fqn, attempt=attempts)
+                
+                # 1. Generate Non-PII
+                gen_result = await self.generator.generate_table_data(config)
+                
+                # 2. Generate PII (Metadata only)
+                profile = next(p for p in profiles if p.table_fqn == table_fqn)
+                pii_spec = {c.name: str(c.pii_category) for c in profile.columns if c.pii_category != "SAFE"}
+                pii_data = await self.pii_handler.populate_pii_columns(table_fqn, config.target_row_count, pii_spec)
+                
+                # 3. Validation Gate
+                output_fqn = f"{settings.output_catalog}.{settings.databricks_schema}.{table_fqn.split('.')[-1]}"
+                quasi_ids = [c.name for c in profile.columns if c.pii_category == "QUASI_PII"]
+                
+                report = await self.validator.validate_table(table_fqn, output_fqn, quasi_ids)
+                
+                if report.overall_pass:
+                    logger.info("Quality Gate Passed", table=table_fqn)
+                    pass_gate = True
+                else:
+                    logger.warn("Quality Gate Failed, attempting self-correction", table=table_fqn)
+                    # Get tuning suggestions from the agent's memory
+                    suggestions = await self.search_semantic_knowledge(f"Tuning suggestions for failed quality gate on {table_fqn}")
+                    # Update config for next attempt (e.g. switch strategy or increase epochs)
+                    if "tvae" in suggestions.lower(): config.ml_strategy = "tvae"
+                    
+            final_reports.append(report)
             
-            # Generate PII (metadata only)
-            pii_spec = {c.name: str(c.pii_category) for c in next(p for p in profiles if p.table_fqn == table_fqn).columns if c.pii_category != "SAFE"}
-            pii_data = await self.pii_handler.populate_pii_columns(table_fqn, config.target_row_count, pii_spec)
-            
-            # TODO: Join PII and Non-PII and write final table
-            
-            # Phase 4: Validate
-            # validation_report = await self.validator.validate_table(table_fqn, output_fqn)
-            # results.append(validation_report)
-            
-        return results
+        return final_reports
 
     async def run(self, input_text: str):
         return await self.agent.run(input_text)
