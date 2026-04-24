@@ -1,115 +1,176 @@
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Protocol, runtime_checkable
+
 import pandas as pd
-from typing import List, Dict, Any, Optional
-from google.adk.agents.llm_agent import LlmAgent
-from google.adk.agents.callback_context import CallbackContext
-from google.adk.models.llm_response import LlmResponse
-from google.adk import tool
-from ....ml.ctgan_trainer import CTGANTrainer
-from ....ml.tvae_trainer import TVAETrainer
-from ....ml.copula_trainer import CopulaTrainer
-from ....ml.timegan_trainer import TimeGANTrainer
-from ....tools.databricks_tools import DatabricksTools
-from ....tools.registry_tools import SyntheticIDRegistry
-from ....tools.knowledge_base import KnowledgeBase
-from ....models.generation_plan import TableGenConfig
-from ....config import settings
 import structlog
+from google.adk.agents import Agent
+from google.adk.tools import tool  # type: ignore[attr-defined]
+
+from ....agents.callbacks import (
+    after_model_callback,
+    after_tool_callback,
+    before_model_callback,
+    before_tool_callback,
+)
+from ....config import get_settings
+from ....ml.copula_trainer import CopulaTrainer
+from ....ml.ctgan_trainer import CTGANTrainer
+from ....ml.timegan_trainer import TimeGANTrainer
+from ....ml.tvae_trainer import TVAETrainer
+from ....models.generation_plan import TableGenConfig
+from ....tools.databricks_tools import DatabricksTools
+from ....tools.knowledge_base import KnowledgeBase
+from ....tools.registry_tools import SyntheticIDRegistry
 
 logger = structlog.get_logger()
 
-class GeneratorAgent:
-    def __init__(self):
-        self.db_tools = DatabricksTools()
-        self.registry = SyntheticIDRegistry()
-        self.knowledge_base = KnowledgeBase()
-        
-        # mature structured instructions
-        instructions = """
-        # IDENTITY
-        You are the Synthetic Data Generation Specialist. Your goal is to produce high-fidelity synthetic 
-        data that preserves the statistical properties of the source while ensuring 0% row-leakage.
+_db_tools = DatabricksTools()
+_registry = SyntheticIDRegistry()
+_knowledge_base = KnowledgeBase()
 
-        # OPERATIONAL RULES
-        1. ALWAYS train the appropriate ML model based on the `ml_strategy` provided.
-        2. ALWAYS fetch and apply business rules from the Knowledge Base after generation.
-        3. Ensure referential integrity by resolving Foreign Keys using the SyntheticIDRegistry.
-        4. Write the final validated DataFrame back to the designated Databricks/File path.
 
-        # STRATEGY SELECTION
-        - use 'ctgan' for mixed tabular data.
-        - use 'tvae' for high-fidelity behavioral data.
-        - use 'timegan' for sequential/temporal data.
-        - use 'copula' for simple, fast interpretable data.
-        """
+# ---------------------------------------------------------------------------
+# Trainer protocol — enables duck-typed dispatch without bare Any
+# ---------------------------------------------------------------------------
 
-        self.agent = LlmAgent(
-            name="GeneratorAgent",
-            instructions=instructions,
-            model=settings.gemini_model,
-            after_model_callback=self._log_llm_activity
+@runtime_checkable
+class _Trainer(Protocol):
+    def train(self, df: pd.DataFrame) -> None: ...
+    def sample(self, n_rows: int) -> pd.DataFrame: ...
+
+
+# ---------------------------------------------------------------------------
+# ADK tool
+# ---------------------------------------------------------------------------
+
+@tool
+async def generate_table_data(config_json: dict[str, Any]) -> dict[str, Any]:
+    """Train an ML model and generate synthetic non-PII data for a single table.
+
+    Resolves all FK columns from the SyntheticIDRegistry to guarantee referential
+    integrity.  Registers generated PKs so child tables can reference them.
+
+    Args:
+        config_json: Serialised TableGenConfig dict.
+
+    Returns:
+        Dict with rows_written, table_fqn, and write_timestamp.
+    """
+    cfg = get_settings()
+    config = TableGenConfig.model_validate(config_json)
+    logger.info("Generating data", table=config.table_fqn, strategy=config.ml_strategy)
+
+    # 1. Fetch training sample (non-PII columns only)
+    real_df = await _db_tools.sample_dataframe(config.table_fqn, cfg.max_profiling_sample_rows)
+    train_cols = [c for c in config.non_pii_columns if c in real_df.columns]
+    if not train_cols:
+        raise ValueError(f"No non-PII columns found for table {config.table_fqn}")
+    train_df = real_df[train_cols]
+
+    # 2. Select and train model — training is CPU-bound, run in thread
+    trainer: _Trainer
+    if config.ml_strategy == "tvae":
+        _t = TVAETrainer(config.table_fqn)
+    elif config.ml_strategy == "copula":
+        _t = CopulaTrainer(config.table_fqn)
+    elif config.ml_strategy == "timegan":
+        _t = TimeGANTrainer(config.table_fqn)
+    else:
+        _t = CTGANTrainer(config.table_fqn)
+    trainer = _t
+
+    await asyncio.to_thread(trainer.train, train_df)
+    logger.info("Model training complete", table=config.table_fqn, strategy=config.ml_strategy)
+
+    # 3. Generate ~50% extra rows so business rule filtering doesn't leave us short
+    target = config.target_row_count
+    synth_df = await asyncio.to_thread(trainer.sample, int(target * 1.5))
+
+    # 4. Apply business rules
+    rules = await _knowledge_base.get_business_rules(config.table_fqn)
+    for rule in rules:
+        logger.info("Applying business rule", table=config.table_fqn, rule=rule["description"])
+        try:
+            synth_df = synth_df.query(rule["code"])
+        except Exception as exc:
+            logger.error("Failed to apply rule", rule=rule["description"], error=str(exc))
+
+    # Trim to target
+    if len(synth_df) > target:
+        synth_df = synth_df.head(target)
+
+    # 5. Resolve FK columns from SyntheticIDRegistry
+    for fk in config.foreign_keys:
+        if fk.fk_col not in synth_df.columns:
+            continue
+        parent_ids = await _registry.sample_fk(
+            fk.parent_table_fqn, fk.parent_pk_col, len(synth_df)
         )
-        self.agent.register_tool(self.generate_table_data)
-
-    async def _log_llm_activity(self, ctx: CallbackContext, response: LlmResponse):
-        """Callback to monitor agent reasoning and token usage."""
-        logger.info("GeneratorAgent LLM Activity", 
-                    text=response.text,
-                    usage=response.usage_metadata if hasattr(response, 'usage_metadata') else None)
-        return response
-
-    @tool
-    async def generate_table_data(self, config: TableGenConfig) -> Dict[str, Any]:
-        """Train model and generate synthetic data for a single table."""
-        logger.info("Generating data for table", table=config.table_fqn)
-        
-        # 1. Get training data
-        real_df = await self.db_tools.sample_dataframe(config.table_fqn, settings.max_profiling_sample_rows)
-        
-        # 2. Select and train model
-        trainer: Any
-        if config.ml_strategy == "tvae":
-            trainer = TVAETrainer(config.table_fqn)
-        elif config.ml_strategy == "copula":
-            trainer = CopulaTrainer(config.table_fqn)
-        elif config.ml_strategy == "timegan":
-            trainer = TimeGANTrainer(config.table_fqn)
+        if parent_ids:
+            synth_df[fk.fk_col] = parent_ids[: len(synth_df)]
+            logger.debug(
+                "Resolved FK",
+                table=config.table_fqn,
+                fk_col=fk.fk_col,
+                parent=fk.parent_table_fqn,
+            )
         else:
-            trainer = CTGANTrainer(config.table_fqn)
-            
-        trainer.train(real_df[config.non_pii_columns])
-        
-        # 3. Sample
-        # Generate extra rows in case business rules filter some out
-        synth_df = trainer.sample(int(config.target_row_count * 1.5))
-        
-        # 4. Apply Business Rules
-        rules = await self.knowledge_base.get_business_rules(config.table_fqn)
-        for rule in rules:
-            logger.info("Applying business rule", table=config.table_fqn, rule=rule["description"])
-            try:
-                synth_df = synth_df.query(rule["code"])
-            except Exception as e:
-                logger.error("Failed to apply rule", rule=rule, error=str(e))
-                
-        # Truncate back to target size if needed
-        if len(synth_df) > config.target_row_count:
-            synth_df = synth_df.head(config.target_row_count)
-            
-        # 5. Resolve FKs (Placeholder logic)
-        # for fk in config.foreign_keys:
-        #    synth_df[fk.col] = await self.registry.sample_fk(fk.parent_table, fk.parent_pk, len(synth_df))
-        
-        # 6. Write to Databricks
-        output_fqn = f"{settings.output_catalog}.{settings.databricks_schema}.{config.table_fqn.split('.')[-1]}"
-        result = await self.db_tools.write_synthetic_table(output_fqn, synth_df)
-        
-        # 7. Register PKs if any
-        # await self.registry.register_ids(config.table_fqn, pk_col, synth_df[pk_col].tolist())
-        
-        return result
+            logger.warning(
+                "No parent IDs available for FK — parent table not yet generated?",
+                table=config.table_fqn,
+                fk_col=fk.fk_col,
+                parent=fk.parent_table_fqn,
+            )
 
-    async def run(self, input_text: str):
-        return await self.agent.run(input_text)
+    # 6. Write non-PII output
+    output_fqn = _output_fqn(config.table_fqn)
+    result = await _db_tools.write_synthetic_table(output_fqn, synth_df)
 
-# Export root_agent for ADK AgentLoader
-root_agent = GeneratorAgent().agent
+    # 7. Register PKs so child tables can reference them
+    for pk_col in config.primary_key_cols:
+        if pk_col in synth_df.columns:
+            await _registry.register_ids(
+                config.table_fqn, pk_col, synth_df[pk_col].tolist()
+            )
+
+    return result
+
+
+def _output_fqn(source_fqn: str) -> str:
+    cfg = get_settings()
+    table_name = source_fqn.split(".")[-1]
+    return f"{cfg.output_catalog}.{cfg.databricks_schema}.{table_name}"
+
+
+# ---------------------------------------------------------------------------
+# ADK root agent
+# ---------------------------------------------------------------------------
+
+root_agent = Agent(
+    name="generator_agent",
+    model="gemini-2.5-flash",
+    description=(
+        "Synthetic data generation specialist that trains ML models (CTGAN, TVAE, "
+        "Copula, TimeGAN) on real table samples, generates non-PII columns, resolves "
+        "FK references from the ID registry, and writes output to Databricks."
+    ),
+    instruction="""You are a synthetic data generation specialist.
+
+For each table in the generation plan:
+1. Call generate_table_data with the serialised TableGenConfig.
+2. The tool trains the selected ML model, generates data, resolves FKs, and writes to Databricks.
+3. Report any tables that failed so the orchestrator can trigger self-correction.
+
+Strategy selection guidance:
+- ctgan: mixed-type tables with complex distributions (default)
+- tvae: high-fidelity behavioural / account-level tables
+- timegan: tables with a temporal sequence key
+- copula: simple tables where interpretability matters more than fidelity""",
+    tools=[generate_table_data],
+    before_model_callback=before_model_callback,
+    after_model_callback=after_model_callback,
+    before_tool_callback=before_tool_callback,
+    after_tool_callback=after_tool_callback,
+)

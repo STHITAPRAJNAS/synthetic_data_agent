@@ -1,0 +1,27 @@
+{
+  "name": "validator_agent",
+  "description": "Synthetic data quality specialist that runs KS tests, chi-squared tests, correlation matrix Frobenius norm comparison, FK integrity checks, business rule assertions, PII leakage detection, and k-anonymity validation against a generated synthetic table.",
+  "url": "http://localhost:8004/",
+  "version": "1.0.0",
+  "protocolVersion": "0.2.6",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "supportsAuthenticatedExtendedCard": false,
+  "skills": [
+    {
+      "id": "validate_table",
+      "name": "Validate Synthetic Table",
+      "description": "Run all quality gates against a synthetic table: KS/chi-squared statistical fidelity tests, correlation matrix delta, FK orphan detection, business rule pass rate, PII leakage rate, and k-anonymity. Returns a complete QualityReport.",
+      "tags": ["validation", "quality", "ks-test", "privacy", "k-anonymity", "fk-integrity"],
+      "examples": [
+        "Validate the synthetic transactions table against the original",
+        "Run quality gates on synthetic users table with quasi-identifiers: age, zip"
+      ]
+    }
+  ]
+}

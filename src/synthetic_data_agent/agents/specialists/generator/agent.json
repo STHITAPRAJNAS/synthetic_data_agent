@@ -1,0 +1,27 @@
+{
+  "name": "generator_agent",
+  "description": "Synthetic data generation specialist that trains ML models (CTGAN, TVAE, Gaussian Copula, TimeGAN/PAR) on real table samples, generates non-PII synthetic columns with full referential integrity via the ID registry, and writes output to Databricks.",
+  "url": "http://localhost:8002/",
+  "version": "1.0.0",
+  "protocolVersion": "0.2.6",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "supportsAuthenticatedExtendedCard": false,
+  "skills": [
+    {
+      "id": "generate_table_data",
+      "name": "Generate Table Data",
+      "description": "Train the selected ML model and generate synthetic non-PII columns for a table. Resolves FK columns from the SyntheticIDRegistry and registers generated PKs for child tables.",
+      "tags": ["ctgan", "tvae", "copula", "timegan", "synthetic-data", "generation"],
+      "examples": [
+        "Generate 1 million synthetic rows for the transactions table using CTGAN",
+        "Generate synthetic users table using TVAE for high-fidelity behavioural data"
+      ]
+    }
+  ]
+}

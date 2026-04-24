@@ -1,0 +1,27 @@
+{
+  "name": "profiler_agent",
+  "description": "Data profiling specialist that samples Databricks tables, runs multi-layer PII detection (regex, Presidio NLP, LLM heuristic), and returns complete TableProfile objects with column statistics, null rates, cardinality, and distribution types.",
+  "url": "http://localhost:8001/",
+  "version": "1.0.0",
+  "protocolVersion": "0.2.6",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "supportsAuthenticatedExtendedCard": false,
+  "skills": [
+    {
+      "id": "profile_tables",
+      "name": "Profile Tables",
+      "description": "Sample and profile one or more Databricks tables, detecting PII columns and computing column statistics. Returns serialised TableProfile objects.",
+      "tags": ["profiling", "pii-detection", "statistics", "databricks"],
+      "examples": [
+        "Profile the table catalog.schema.transactions",
+        "Profile these tables: [catalog.schema.users, catalog.schema.accounts]"
+      ]
+    }
+  ]
+}

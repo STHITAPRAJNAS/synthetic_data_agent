@@ -1,0 +1,27 @@
+{
+  "name": "pii_handler_agent",
+  "description": "PII isolation specialist that generates format-valid but provably non-real synthetic values for PII columns. Operates exclusively on column metadata and distribution specs — never receives or processes actual real data rows.",
+  "url": "http://localhost:8003/",
+  "version": "1.0.0",
+  "protocolVersion": "0.2.6",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "supportsAuthenticatedExtendedCard": false,
+  "skills": [
+    {
+      "id": "populate_pii_columns",
+      "name": "Populate PII Columns",
+      "description": "Generate synthetic PII values (SSNs, emails, phone numbers, addresses, card PANs, IPs) using provably non-real ranges. SSNs use area codes 900-999, phones use 555-01XX, emails use @example.com, card PANs use BIN prefix 9 with valid Luhn checksums, IPs use RFC 5737 TEST-NET ranges.",
+      "tags": ["pii", "privacy", "synthetic-pii", "data-masking", "isolation"],
+      "examples": [
+        "Generate synthetic SSNs and email addresses for 10000 rows",
+        "Populate PII columns for the users table: email, phone, ssn"
+      ]
+    }
+  ]
+}

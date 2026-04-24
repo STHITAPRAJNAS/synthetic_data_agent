@@ -1,0 +1,27 @@
+{
+  "name": "entity_graph_agent",
+  "description": "Data modeling specialist that builds the entity-relationship graph from TableProfiles, infers FK relationships by naming convention and Unity Catalog constraints, computes topological generation order, and returns a GenerationPlan.",
+  "url": "http://localhost:8001/",
+  "version": "1.0.0",
+  "protocolVersion": "0.2.6",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "supportsAuthenticatedExtendedCard": false,
+  "skills": [
+    {
+      "id": "create_generation_plan",
+      "name": "Create Generation Plan",
+      "description": "Build an entity-relationship graph from TableProfiles and produce a topologically ordered GenerationPlan that ensures parent tables are generated before child tables.",
+      "tags": ["entity-graph", "fk-detection", "topological-sort", "planning"],
+      "examples": [
+        "Create a generation plan for these profiles: [...]",
+        "Determine the correct generation order for tables with FK dependencies"
+      ]
+    }
+  ]
+}
