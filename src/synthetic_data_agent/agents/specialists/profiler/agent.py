@@ -94,10 +94,24 @@ async def _profile_single_table(fqn: str, cfg: Any) -> dict[str, Any]:
 
         col_profiles = await asyncio.gather(*[_profile_col(c) for c in df.columns])
 
+        # Detect temporal column (first datetime column, or one named *_at / *_date / *_time)
+        temporal_col: str | None = None
+        for cp in col_profiles:
+            if cp.distribution_type == DistributionType.TEMPORAL:
+                temporal_col = cp.name
+                break
+        if temporal_col is None:
+            for cp in col_profiles:
+                lc = cp.name.lower()
+                if any(lc.endswith(s) for s in ("_at", "_date", "_time", "_ts", "_timestamp")):
+                    temporal_col = cp.name
+                    break
+
         profile = TableProfile(
             table_fqn=fqn,
             row_count=actual_row_count,
             columns=list(col_profiles),
+            temporal_col=temporal_col,
         )
         logger.info("Profiling complete", table=fqn, columns=len(col_profiles))
         return profile.model_dump(mode="json")

@@ -36,7 +36,12 @@ class Settings(BaseSettings):
     max_profiling_sample_rows: int = 500_000
     ctgan_epochs: int = 300
     generation_batch_size: int = 50_000
-    log_level: str = "INFO"
+    log_level: str = Field(
+        default="INFO",
+        pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$",
+        description="Python logging level",
+    )
+    app_version: str = "1.0.0"
 
 
 @lru_cache(maxsize=1)

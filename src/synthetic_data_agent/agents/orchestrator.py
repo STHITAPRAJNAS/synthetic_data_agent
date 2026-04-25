@@ -103,7 +103,7 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
     """
     from .specialists.profiler.agent import profile_tables
     from .specialists.entity_graph.agent import create_generation_plan
-    from .specialists.generator.agent import generate_table_data
+    from .specialists.generator.agent import plan_generation, train_and_generate
     from .specialists.pii_handler.agent import populate_pii_columns
     from .specialists.validator.agent import validate_table
 
@@ -135,26 +135,51 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
     for table_fqn in plan.tables_ordered:
         config: TableGenConfig = plan.table_configs[table_fqn]
 
-        # Adaptive strategy selection — use best historical strategy if available
-        best = _model_registry.best_strategy_for(table_fqn)
-        if best:
-            logger.info("Using historical best strategy", table=table_fqn, strategy=best)
-            config = config.model_copy(update={"ml_strategy": best})  # type: ignore[assignment]
+        # Retrieve the profile for this table (needed by generator)
+        profile = next((p for p in profiles_json if p["table_fqn"] == table_fqn), {})
+
+        # ── STEP 1: Plan — strategy selection + cache check ────────────────
+        gen_plan = await plan_generation(
+            config.model_dump(mode="json"),
+            profile,
+        )
+        strategy: str = gen_plan.get("recommended_strategy", config.ml_strategy)
+        cached_artifact_key: str | None = gen_plan.get("artifact_key")
+        logger.info(
+            "generation_plan",
+            table=table_fqn,
+            strategy=strategy,
+            cache_hit=gen_plan.get("cache_hit"),
+            reason=gen_plan.get("strategy_reason"),
+        )
+        config = config.model_copy(update={"ml_strategy": strategy})  # type: ignore[assignment]
 
         max_attempts = 3
         report_json: dict[str, Any] | None = None
 
         for attempt in range(1, max_attempts + 1):
-            logger.info("Generation attempt", table=table_fqn, attempt=attempt, strategy=config.ml_strategy)
+            logger.info("generation_attempt", table=table_fqn, attempt=attempt, strategy=strategy)
 
             try:
-                # 3a. Generate non-PII columns
-                await generate_table_data(config.model_dump(mode="json"))
+                # ── 3a. Train + generate (long-running) ────────────────────
+                gen_result: dict[str, Any] = {}
+                async for progress in train_and_generate(
+                    config.model_dump(mode="json"),
+                    profile,
+                    strategy,
+                    cached_artifact_key=cached_artifact_key,
+                ):
+                    pct = progress.get("progress", 0)
+                    msg = progress.get("message", "")
+                    status = progress.get("status", "")
+                    logger.info("generation_progress", table=table_fqn, pct=pct, msg=msg)
+                    if status == "completed":
+                        gen_result = progress.get("result", {})
+                        cached_artifact_key = gen_result.get("artifact_key")
+                    elif status == "failed":
+                        raise RuntimeError(f"Generator failed: {msg}")
 
-                # 3b. Build PII spec from column profiles (metadata only — no real data)
-                profile = next(
-                    (p for p in profiles_json if p["table_fqn"] == table_fqn), None
-                )
+                # ── 3b. PII generation (metadata-only) ─────────────────────
                 if profile and config.pii_columns:
                     pii_spec = {
                         c["name"]: {
@@ -170,7 +195,7 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
                         pii_spec=pii_spec,
                     )
 
-                    # 3c. Merge PII columns into the output table
+                    # Merge PII into the written output table
                     output_fqn = _output_fqn(table_fqn)
                     db = _get_db_tools()
                     synth_df = await db.sample_dataframe(output_fqn, config.target_row_count)
@@ -179,7 +204,7 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
                             synth_df[col] = values[: len(synth_df)]
                     await db.write_synthetic_table(output_fqn, synth_df)
 
-                # 3d. Validate
+                # ── 3c. Validate ────────────────────────────────────────────
                 output_fqn = _output_fqn(table_fqn)
                 quasi_ids = [
                     c["name"] for c in (profile or {}).get("columns", [])
@@ -188,22 +213,30 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
                 report_json = await validate_table(table_fqn, output_fqn, quasi_ids)
                 report = QualityReport.model_validate(report_json)
 
-                await _model_registry.record_run(table_fqn, config.ml_strategy, report)
+                # Record run in registry (including artifact key for future cache hits)
+                await _model_registry.record_run(
+                    table_fqn,
+                    strategy,
+                    report,
+                    artifact_key=gen_result.get("artifact_key"),
+                )
 
                 if report.overall_pass:
-                    logger.info("Quality gate passed", table=table_fqn, attempt=attempt)
+                    logger.info("quality_gate_passed", table=table_fqn, attempt=attempt)
                     break
 
-                # Self-correction — adjust strategy/params for next attempt
-                logger.warning("Quality gate failed", table=table_fqn, attempt=attempt)
+                # Self-correction
+                logger.warning("quality_gate_failed", table=table_fqn, attempt=attempt)
                 suggestions = _model_registry.get_tuning_suggestions(table_fqn, report)
                 if "switch_strategy" in suggestions:
                     new_strategy: str = suggestions["switch_strategy"]
-                    logger.info("Switching strategy", table=table_fqn, new=new_strategy)
+                    logger.info("switching_strategy", table=table_fqn, new=new_strategy)
+                    strategy = new_strategy
                     config = config.model_copy(update={"ml_strategy": new_strategy})  # type: ignore[assignment]
+                    cached_artifact_key = None  # new strategy = no cache
 
             except Exception as exc:
-                logger.error("Pipeline error", table=table_fqn, attempt=attempt, error=str(exc))
+                logger.error("pipeline_error", table=table_fqn, attempt=attempt, error=str(exc))
                 if attempt == max_attempts:
                     report_json = QualityReport(
                         table_fqn=table_fqn,
