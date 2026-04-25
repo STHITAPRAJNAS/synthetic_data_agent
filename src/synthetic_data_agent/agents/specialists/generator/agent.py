@@ -51,6 +51,7 @@ from ....models.column_profile import TableProfile
 from ....models.generation_plan import TableGenConfig
 from ....tools.knowledge_base import KnowledgeBase
 from ....tools.registry_tools import SyntheticIDRegistry
+from ....tools.value_ledger import compute_entity_hashes
 
 logger = structlog.get_logger()
 
@@ -179,6 +180,8 @@ async def train_and_generate(
     profile_json: dict[str, Any],
     strategy: str,
     cached_artifact_key: str | None = None,
+    pipeline_run_id: str | None = None,
+    pipeline_salt: str | None = None,
     tool_context: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Train a synthesis model (or load from cache) then generate synthetic data.
@@ -230,6 +233,28 @@ async def train_and_generate(
         return
 
     train_df = real_df[non_pii_cols].copy()
+
+    # ── Compute entity hashes for PII columns ─────────────────────────────
+    # The generator is the ONLY agent that sees the real DataFrame.  We hash
+    # each PII cell value here (salt + hash, never the raw value) and pass the
+    # hash list to the PII handler so it can enforce cross-table consistency
+    # via the SyntheticValueLedger — without ever receiving real PII.
+    entity_hashes: dict[str, list[str]] = {}
+    if pipeline_salt:
+        for pii_col in config.pii_columns:
+            if pii_col in real_df.columns:
+                entity_hashes[pii_col] = compute_entity_hashes(
+                    real_df[pii_col].tolist(), pipeline_salt
+                )
+        if entity_hashes:
+            yield {
+                "status": "running",
+                "progress": 8,
+                "message": (
+                    f"Computed entity hashes for {len(entity_hashes)} PII column(s) "
+                    f"— cross-table consistency enabled."
+                ),
+            }
 
     yield {
         "status": "running",
@@ -419,6 +444,9 @@ async def train_and_generate(
             "used_cache": used_cache,
             "artifact_key": cached_artifact_key,
             "duration_s": round(total_s, 1),
+            # Entity hashes — passed to PII handler for cross-table consistency.
+            # Contains hashed originals (not real values) keyed by column name.
+            "entity_hashes": entity_hashes,
             **write_result,
         },
     }

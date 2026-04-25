@@ -16,6 +16,7 @@ from .callbacks import (
 )
 from ..config import get_settings
 from ..ml.model_registry import ModelRegistry
+from ..tools.value_ledger import SyntheticValueLedger
 from ..models.generation_plan import GenerationPlan, TableGenConfig
 from ..models.quality_report import QualityReport
 from ..tools.knowledge_base import KnowledgeBase
@@ -33,6 +34,7 @@ _knowledge_base = KnowledgeBase()
 _semantic_memory = SemanticMemory()
 _registry = SyntheticIDRegistry()
 _model_registry = ModelRegistry()
+_value_ledger = SyntheticValueLedger()
 
 _db_tools_ref: Any = None  # populated on first use
 
@@ -113,6 +115,7 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
     await _knowledge_base.init_db()
     await _semantic_memory.init_db()
     await _registry.init_db()
+    await _value_ledger.init_db()
 
     # -------------------------------------------------------------------------
     # Phase 1 — Profile
@@ -125,7 +128,11 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
     # -------------------------------------------------------------------------
     plan_json: dict[str, Any] = await create_generation_plan(profiles_json)
     plan = GenerationPlan.model_validate(plan_json)
-    logger.info("Generation plan created", ordered_tables=plan.tables_ordered)
+    logger.info(
+        "Generation plan created",
+        ordered_tables=plan.tables_ordered,
+        pipeline_run_id=plan.pipeline_run_id,
+    )
 
     final_reports: list[dict[str, Any]] = []
 
@@ -168,6 +175,8 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
                     profile,
                     strategy,
                     cached_artifact_key=cached_artifact_key,
+                    pipeline_run_id=plan.pipeline_run_id,
+                    pipeline_salt=plan.pipeline_salt,
                 ):
                     pct = progress.get("progress", 0)
                     msg = progress.get("message", "")
@@ -179,7 +188,7 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
                     elif status == "failed":
                         raise RuntimeError(f"Generator failed: {msg}")
 
-                # ── 3b. PII generation (metadata-only) ─────────────────────
+                # ── 3b. PII generation (metadata-only + cross-table consistency) ──
                 if profile and config.pii_columns:
                     pii_spec = {
                         c["name"]: {
@@ -189,10 +198,18 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
                         for c in profile.get("columns", [])
                         if c["name"] in config.pii_columns
                     }
+                    # entity_hashes from generator: column → list of hashed originals.
+                    # Passing these to the PII handler enables the SyntheticValueLedger
+                    # to return the same synthetic value for the same original entity
+                    # across different tables in this pipeline run.
+                    entity_hashes: dict[str, list[str]] = gen_result.get("entity_hashes", {})
                     pii_data = await populate_pii_columns(
                         table_fqn=table_fqn,
                         row_count=config.target_row_count,
                         pii_spec=pii_spec,
+                        entity_hashes=entity_hashes or None,
+                        pipeline_run_id=plan.pipeline_run_id,
+                        pipeline_salt=plan.pipeline_salt,
                     )
 
                     # Merge PII into the written output table
@@ -256,6 +273,17 @@ async def run_pipeline(table_fqns: list[str]) -> list[dict[str, Any]]:
             )
 
     passed = sum(1 for r in final_reports if r.get("overall_pass"))
+    # Optionally clear the ledger for this run to reclaim DB space.
+    # Remove the guard below to always clean up; keep it to retain the ledger
+    # for debugging cross-table consistency issues.
+    all_passed = passed == len(final_reports)
+    if all_passed:
+        try:
+            cleared = await _value_ledger.clear_run(plan.pipeline_run_id)
+            logger.info("value_ledger_cleared", pipeline_run_id=plan.pipeline_run_id, rows=cleared)
+        except Exception as exc:
+            logger.warning("value_ledger_clear_failed", error=str(exc))
+
     logger.info(
         "Pipeline complete",
         tables_total=len(final_reports),
